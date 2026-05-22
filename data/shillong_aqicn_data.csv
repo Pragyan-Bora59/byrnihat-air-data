@@ -1,3 +1,3 @@
 0,recorded_at_local_time,target_city,station_code,station_name,station_latitude,station_longitude,api_time,aqi,pm25,pm10,no2,so2,co,o3,temperature,humidity,pressure,wind
 ,,,,,,,,,,,,,,,,,,
-,2026-05-22 17:13:37,Shillong,H12740,"Lumpyngngad, Shillong, India",25.5586,91.8985,2026-05-22 17:00:00,17.0,,,0.3,4.9,1.5,17.4,23.005000000000003,74.3825,83.6125,4.9725
+,2026-05-22 12:13:32,Shillong,H12740,"Lumpyngngad, Shillong, India",25.5586,91.8985,2026-05-22 17:00:00,16.0,,,0.2,4.9,1.5,16.1,22.97,74.5,83.62,5.22
