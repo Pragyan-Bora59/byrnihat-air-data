@@ -1,0 +1,2 @@
+recorded_at_local_time,station_name,station_latitude,station_longitude,api_time,aqi,pm25,pm10,no2,so2,co,o3,temperature,humidity,pressure,wind
+2026-05_22 13:30:11,"15th Mile-Nongthymmai, Byrnihat",26.05374,91.86796,2026-05-22 12:30:00,99,39,99,0,1,4,,,,,
