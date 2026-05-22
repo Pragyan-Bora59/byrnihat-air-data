@@ -13,33 +13,49 @@ load_dotenv(BASE_DIR / ".env")
 
 AQICN_TOKEN = os.getenv("AQICN_TOKEN")
 
-#2. Byrnihat approximate coordinates
-
-Latitude  = 26.0525
-Longitude = 91.8700
-
-#CSV file path
-Data_File = Path("data/Byrnihat_AQICN_data.csv")
-
+#2. Stations
+STATIONS = [
+    {
+        "city": "Byrnihat",
+        "station_name": "15th Mile-Nongthymmai, Byrnihat",
+        "station_code": "A1364707",
+        "url": "https://api.waqi.info/feed/A1364707/",
+        "file": Path("data/byrnihat_aqicn_data.csv")
+    },
+    {
+        "city": "Guwahati",
+        "station_name": "Railway Colony, Guwahati",
+        "station_code": "H11844",
+        "url": "https://api.waqi.info/feed/@11844/",
+        "file": Path("data/guwahati_aqicn_data.csv")
+    },
+    {
+        "city": "Shillong",
+        "station_name": "Lumpyngngad, Shillong",
+        "station_code": "H12740",
+        "url": "https://api.waqi.info/feed/@12740/",
+        "file": Path("data/shillong_aqicn_data.csv")
+    }
+]
 #4. Function to fetch the data:
 
-def fetch_aqicn_data():
-    
+def fetch_aqicn_data(station):
+
     if not AQICN_TOKEN:
-        raise ValueError("AQICN token not found. Please add it in your env file.")
-    
-    url = "https://api.waqi.info/feed/A1364707/"
-    
+        raise ValueError("AQICN token not found. Please add it in your .env file.")
+
     params = {
         "token": AQICN_TOKEN
     }
-    response = requests.get(url, params= params, timeout=30)
+
+    response = requests.get(station["url"], params=params, timeout=30)
     response.raise_for_status()
+
     api_response = response.json()
 
     if api_response.get("status") != "ok":
-        raise ValueError(f"API returned an error: { api_response}")
-    
+        raise ValueError(f"API returned an error for {station['city']}: {api_response}")
+
     return api_response["data"]
 
 #5. Function to safely get pollutant values
@@ -51,7 +67,7 @@ def get_iaqi_value(iaqi_data, pollutant_name):
 
 #6. Converting API data into one clean row
 
-def convert_api_data_to_row(data):
+def convert_api_data_to_row(data, station):
     iaqi = data.get("iaqi", {})
     city = data.get("city", {})
     time_info = data.get("time", {})
@@ -59,35 +75,44 @@ def convert_api_data_to_row(data):
     station_coordinates = city.get("geo", [None, None])
     
     row = {
-        "recorded_at_local_time": datetime.now().strftime("%Y-%m_%d %H:%M:%S"),
+    "recorded_at_local_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
 
-        "station_name": city.get("name"),
-        "station_latitude": station_coordinates[0],
-        "station_longitude": station_coordinates[1],
-        "api_time": time_info.get("s"),
-        "aqi": data.get("aqi"),
-        "pm25": get_iaqi_value(iaqi, "pm25"),
-        "pm10": get_iaqi_value(iaqi, "pm10"),
-           "no2": get_iaqi_value(iaqi, "no2"),
-        "so2": get_iaqi_value(iaqi, "so2"),
-        "co": get_iaqi_value(iaqi, "co"),
-        "o3": get_iaqi_value(iaqi, "o3"),
+    "target_city": station["city"],
+    "station_code": station["station_code"],
 
-        "temperature": get_iaqi_value(iaqi, "t"),
-        "humidity": get_iaqi_value(iaqi, "h"),
-        "pressure": get_iaqi_value(iaqi, "p"),
-        "wind": get_iaqi_value(iaqi, "w"),
-    }
+    "station_name": city.get("name"),
+    "station_latitude": station_coordinates[0],
+    "station_longitude": station_coordinates[1],
+
+    "api_time": time_info.get("s"),
+    "aqi": data.get("aqi"),
+
+    "pm25": get_iaqi_value(iaqi, "pm25"),
+    "pm10": get_iaqi_value(iaqi, "pm10"),
+    "no2": get_iaqi_value(iaqi, "no2"),
+    "so2": get_iaqi_value(iaqi, "so2"),
+    "co": get_iaqi_value(iaqi, "co"),
+    "o3": get_iaqi_value(iaqi, "o3"),
+
+    "temperature": get_iaqi_value(iaqi, "t"),
+    "humidity": get_iaqi_value(iaqi, "h"),
+    "pressure": get_iaqi_value(iaqi, "p"),
+    "wind": get_iaqi_value(iaqi, "w"),
+}
     return row
 
 #7. Saving data in the csv file without duplicates:
 
-def save_row_to_csv(row):
+def save_row_to_city_csv(row, station):
 
-    Data_File.parent.mkdir(exist_ok= True)
+    data_file = station["file"]
+
+    data_file.parent.mkdir(exist_ok=True)
+
     new_data = pd.DataFrame([row])
-    if Data_File.exists():
-        old_data = pd.read_csv(Data_File)
+
+    if data_file.exists():
+        old_data = pd.read_csv(data_file)
 
         combined_data = pd.concat(
             [old_data, new_data],
@@ -95,33 +120,39 @@ def save_row_to_csv(row):
         )
 
         combined_data = combined_data.drop_duplicates(
-            subset=["station_name", "api_time"],
+            subset=["station_code", "api_time"],
             keep="last"
         )
 
     else:
         combined_data = new_data
 
-    combined_data.to_csv(Data_File, index=False)
+    combined_data.to_csv(data_file, index=False)
 
 #8 Main Function
 def main():
-    print("Fetchin the latest air quality data near Byrnihat")
 
-    aqi_data = fetch_aqicn_data()
-    row = convert_api_data_to_row(aqi_data)
-    save_row_to_csv(row)
+    print("Fetching latest AQICN air quality data for all stations...")
 
-    print("Data recorded successfully.")
-    print("--------------------------------")
-    print(f"Station name: {row['station_name']}")
-    print(f"Station latitude: {row['station_latitude']}")
-    print(f"Station longitude: {row['station_longitude']}")
-    print(f"API time: {row['api_time']}")
-    print(f"AQI: {row['aqi']}")
-    print(f"PM2.5: {row['pm25']}")
-    print(f"PM10: {row['pm10']}")
-    print(f"Saved file: {Data_File}")
+    for station in STATIONS:
+        print(f"Fetching data for {station['city']}...")
+
+        try:
+            api_data = fetch_aqicn_data(station)
+
+            row = convert_api_data_to_row(api_data, station)
+
+            save_row_to_city_csv(row, station)
+
+            print(
+                f"Success: {station['city']} | "
+                f"AQI: {row['aqi']} | "
+                f"PM2.5: {row['pm25']} | "
+                f"Saved to: {station['file']}"
+            )
+
+        except Exception as error:
+            print(f"Failed for {station['city']}: {error}")
 
  #9. Run the program
 
