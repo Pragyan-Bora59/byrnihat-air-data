@@ -2,10 +2,8 @@ name: Record AQICN data hourly
 
 on:
   schedule:
-    # Runs every hour at minute 17 UTC
-    # In India, this becomes around 47 minutes past every hour
     - cron: "17 * * * *"
-
+    - cron: "47 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -62,5 +60,3 @@ jobs:
             git commit -m "Update AQICN air quality data"
             git push
           fi
-
-
