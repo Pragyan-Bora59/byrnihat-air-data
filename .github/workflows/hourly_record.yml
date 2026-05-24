@@ -2,8 +2,15 @@ name: Record AQICN data hourly
 
 on:
   schedule:
-    - cron: "17 * * * *"
-    - cron: "47 * * * *"
+    # GitHub uses UTC time.
+    # These four schedules give GitHub 4 chances per hour.
+    # In India, they run around :37, :52, :07, and :22 IST.
+    - cron: "7 * * * *"
+    - cron: "22 * * * *"
+    - cron: "37 * * * *"
+    - cron: "52 * * * *"
+
+  # This keeps the manual "Run workflow" button.
   workflow_dispatch:
 
 permissions:
@@ -60,3 +67,6 @@ jobs:
             git commit -m "Update AQICN air quality data"
             git push
           fi
+
+
+    
