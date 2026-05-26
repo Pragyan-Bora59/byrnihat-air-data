@@ -3,28 +3,33 @@ name: Record AQICN data hourly
 on:
   schedule:
     # GitHub uses UTC time.
-    # These four schedules give GitHub 4 chances per hour.
-    # In India, they run around :37, :52, :07, and :22 IST.
+    # These 4 timings give GitHub multiple chances per hour.
+    # In IST, they roughly correspond to :37, :52, :07, and :22.
     - cron: "7 * * * *"
     - cron: "22 * * * *"
     - cron: "37 * * * *"
     - cron: "52 * * * *"
 
-  # This keeps the manual "Run workflow" button.
+  # This allows manual running from the GitHub Actions page.
   workflow_dispatch:
 
 permissions:
   contents: write
+
+concurrency:
+  group: aqicn-data-recording
+  cancel-in-progress: false
 
 jobs:
   record-data:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Show trigger info
+      - name: Show trigger information
         run: |
           echo "Workflow started"
           echo "Triggered by: ${{ github.event_name }}"
+          echo "Current UTC time:"
           date -u
 
       - name: Checkout repository
@@ -32,7 +37,9 @@ jobs:
 
       - name: Show repository files
         run: |
+          echo "Current folder:"
           pwd
+          echo "Repository files:"
           ls -la
 
       - name: Set up Python
@@ -51,7 +58,7 @@ jobs:
 
       - name: Check data folder after script
         run: |
-          echo "Checking data folder:"
+          echo "Checking data folder after running Python script:"
           ls -la data || echo "data folder not found"
 
       - name: Commit and push updated data
@@ -65,8 +72,8 @@ jobs:
             echo "No new data to commit."
           else
             git commit -m "Update AQICN air quality data"
-            git push
+            git pull --rebase origin main
+            git push origin main
           fi
-
 
     
