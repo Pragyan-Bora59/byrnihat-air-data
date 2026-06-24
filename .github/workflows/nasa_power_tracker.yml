@@ -1,0 +1,39 @@
+name: NASA POWER Hourly Tracker
+
+on:
+  schedule:
+    - cron: "30 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update-nasa-power-data:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas requests
+
+      - name: Run NASA POWER tracker
+        run: |
+          python ml/ml/06b_track_nasa_power_hourly.py
+
+      - name: Commit updated NASA data
+        run: |
+          git config --global user.name "github-actions"
+          git config --global user.email "github-actions@github.com"
+          git add data/raw/nasa_power_hourly_tracker.csv
+          git commit -m "Update NASA POWER hourly data" || echo "No changes to commit"
+          git push

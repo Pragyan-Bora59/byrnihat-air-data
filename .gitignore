@@ -1,2 +1,34 @@
-.env
+# Python
 __pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Environment / secrets
+.env
+venv/
+.env/
+
+# Large/generated outputs
+outputs/
+figures/
+mapping/
+*.gif
+*.mp4
+
+# DEM / raster files can be large
+data/dem/
+*.tif
+*.tiff
+
+# Old static NASA POWER files
+data/POWER_Point_Hourly*.csv
+
+# Processed generated files
+data/processed/
+
+# Keep raw tracker file if needed
+!data/raw/nasa_power_hourly_tracker.csv
+
+# System files
+.DS_Store
+Thumbs.db
