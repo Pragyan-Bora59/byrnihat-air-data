@@ -34,6 +34,6 @@ jobs:
         run: |
           git config --global user.name "github-actions"
           git config --global user.email "github-actions@github.com"
-          git add data/raw/nasa_power_hourly_tracker.csv
+          git add -f data/raw/nasa_power_hourly_tracker.csv
           git commit -m "Update NASA POWER hourly data" || echo "No changes to commit"
           git push
