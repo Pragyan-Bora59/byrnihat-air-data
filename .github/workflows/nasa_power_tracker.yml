@@ -28,7 +28,7 @@ jobs:
 
       - name: Run NASA POWER tracker
         run: |
-          python ml/ml/06b_track_nasa_power_hourly.py
+          python ml/06b_track_nasa_power_hourly.py
 
       - name: Commit updated NASA data
         run: |
