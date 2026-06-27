@@ -10,7 +10,6 @@ on:
     - cron: "37 * * * *"
     - cron: "52 * * * *"
 
-  # This allows manual running from the GitHub Actions page.
   workflow_dispatch:
 
 permissions:
@@ -53,6 +52,8 @@ jobs:
           pip install -r requirements.txt
 
       - name: Run AQICN data collection script
+        env:
+          AQICN_TOKEN: ${{ secrets.AQICN_TOKEN }}
         run: |
           python Record_AQICNdata.py
 
@@ -60,6 +61,24 @@ jobs:
         run: |
           echo "Checking data folder after running Python script:"
           ls -la data || echo "data folder not found"
+
+      - name: Show AQICN CSV row counts
+        run: |
+          python - << 'PY'
+          from pathlib import Path
+          import pandas as pd
+
+          for file in Path("data").glob("*aqicn*.csv"):
+              try:
+                  df = pd.read_csv(file)
+                  print(file, df.shape)
+                  if "api_time" in df.columns:
+                      print("Unique api_time:", df["api_time"].nunique())
+                      print("Start:", df["api_time"].min())
+                      print("End:", df["api_time"].max())
+              except Exception as e:
+                  print(file, "ERROR:", e)
+          PY
 
       - name: Commit and push updated data
         run: |
@@ -75,5 +94,3 @@ jobs:
             git pull --rebase origin main
             git push origin main
           fi
-
-    
