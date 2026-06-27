@@ -1,6 +1,10 @@
 name: Record AQICN data hourly
 
 on:
+  push:
+    branches:
+      - main
+
   schedule:
     # GitHub uses UTC time.
     # These 4 timings give GitHub multiple chances per hour.
@@ -68,14 +72,23 @@ jobs:
           from pathlib import Path
           import pandas as pd
 
+          print("AQICN CSV files after script:")
+
           for file in Path("data").glob("*aqicn*.csv"):
               try:
                   df = pd.read_csv(file)
-                  print(file, df.shape)
+                  print("=" * 80)
+                  print(file)
+                  print("Shape:", df.shape)
+
                   if "api_time" in df.columns:
                       print("Unique api_time:", df["api_time"].nunique())
                       print("Start:", df["api_time"].min())
                       print("End:", df["api_time"].max())
+
+                  print("Last rows:")
+                  print(df.tail())
+
               except Exception as e:
                   print(file, "ERROR:", e)
           PY
@@ -93,8 +106,4 @@ jobs:
             git commit -m "Update AQICN air quality data"
             git pull --rebase origin main
             git push origin main
-<<<<<<< HEAD
           fi
-=======
-          fi
->>>>>>> 0e2c3f6 (Fix AQICN workflow token and data recording)
