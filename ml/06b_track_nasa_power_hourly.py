@@ -1,201 +1,730 @@
 from pathlib import Path
 import pandas as pd
-from datetime import datetime, timedelta, timezone
-import requests
+import numpy as np
 
-#1. Project Paths
+# 1. Paths and configuration
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 DATA_DIR = PROJECT_ROOT / "data"
 RAW_DIR = DATA_DIR / "raw"
+PROCESSED_DIR = DATA_DIR / "processed"
+REPORTS_DIR = PROJECT_ROOT / "outputs" / "reports"
 
-RAW_DIR.mkdir(parents = True, exist_ok = True)
+AQICN_FILE = PROCESSED_DIR / "aqicn_clean_base.csv"
+NASA_TRACKER_FILE = RAW_DIR / "nasa_power_hourly_tracker.csv"
 
-OUTPUT_FILE = RAW_DIR / "nasa_power_hourly_tracker.csv"
+OUTPUT_FILE = PROCESSED_DIR / "ml1_environment_pollution_dataset.csv"
+MISSING_REPORT_FILE = REPORTS_DIR / "ml1_dataset_missing_report.csv"
 
-#2. Station Locations
+PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
-STATIONS = {
-    "Byrnihat": {
-        "latitude": 26.0715,
-        "longitude": 91.8746
-    },
-    "Guwahati": {
-        "latitude": 26.1445,
-        "longitude": 91.7362
-    },
-    "Shillong": {
-        "latitude": 25.5788,
-        "longitude": 91.8933
-    }
-}
+WEATHER_TOLERANCE_HOURS = 6
+FALLBACK_MATCH_THRESHOLD_PERCENT = 50
 
-#3. NASA Power Parameters
+# 2. Helper functions
 
-PARAMETERS = [
-    "T2M",
-    "RH2M",
-    "PRECTOTCORR",
-    "WS10M",
-    "WD10M"
-]
+def clean_column_names(df):
+    df = df.copy()
 
-#4. DATA Range
-
-today = datetime.now(timezone.utc).date()
-start_date = today - timedelta(days = 20)
-end_date = today - timedelta(days = 7)
-
-START = start_date.strftime("%Y%m%d")
-END = end_date.strftime("%Y%m%d")
-
-print("Fetching NASA data form:", START, "to", END)
-
-#5. Function to fetch NASA POWER hourly data
-
-def fethch_nasa_power_hourly(station_name, latitude, longitude):
-
-    base_url = "https://power.larc.nasa.gov/api/temporal/hourly/point"
-
-    params = {
-        "parameters": ",".join(PARAMETERS),
-        "community": "RE",
-        "longitude": longitude,
-        "latitude": latitude,
-        "start": START,
-        "end": END,
-        "format": "JSON",
-        "time-standard": "UTC"
-    }
-
-    print(f"\nRequesting NASA POWER data for {station_name}...")
-
-    response = requests.get(base_url, params=params, timeout=120)
-
-    if response.status_code != 200:
-        print("Request failed.")
-        print("Status code:", response.status_code)
-        print("Response:", response.text[:500])
-        return pd.DataFrame()
-
-    data = response.json()
-
-    # Correct place where NASA stores weather values
-    if "properties" not in data:
-        print("No properties key found in response.")
-        return pd.DataFrame()
-
-    if "parameter" not in data["properties"]:
-        print("No parameter key found inside properties.")
-        print("Available properties keys:", data["properties"].keys())
-        return pd.DataFrame()
-
-    parameter_data = data["properties"]["parameter"]
-
-    if not parameter_data:
-        print("Parameter data is empty.")
-        return pd.DataFrame()
-
-    # Get all time keys from the first available parameter
-    first_parameter = next(iter(parameter_data.values()))
-    all_times = sorted(first_parameter.keys())
-
-    rows = []
-
-    for time_key in all_times:
-        row = {
-            "datetime_utc": pd.to_datetime(time_key, format="%Y%m%d%H", errors="coerce"),
-            "station_name": station_name,
-            "latitude": latitude,
-            "longitude": longitude,
-            "temperature": parameter_data.get("T2M", {}).get(time_key),
-            "humidity": parameter_data.get("RH2M", {}).get(time_key),
-            "rainfall": parameter_data.get("PRECTOTCORR", {}).get(time_key),
-            "wind_speed": parameter_data.get("WS10M", {}).get(time_key),
-            "wind_direction": parameter_data.get("WD10M", {}).get(time_key)
-        }
-
-        rows.append(row)
-
-    df = pd.DataFrame(rows)
-
-    print(f"Fetched {len(df)} rows for {station_name}")
+    df.columns = (
+        df.columns
+        .str.strip()
+        .str.lower()
+        .str.replace(" ", "_", regex=False)
+        .str.replace(".", "_", regex=False)
+        .str.replace("-", "_", regex=False)
+        .str.replace("/", "_", regex=False)
+    )
 
     return df
 
-#6. Fetch data for all the stations
 
-all_weather_dfs = []
+def standardize_pollutant_names(df):
+    """
+    Standardizes common pollutant column variations.
+    Example:
+    pm2_5 -> pm25
+    pm2_5_value -> pm25 if present
+    """
 
-for station_name, info in STATIONS.items():
-    station_df = fethch_nasa_power_hourly(
-        station_name = station_name,
-        latitude = info["latitude"],
-        longitude = info["longitude"]
+    df = df.copy()
+
+    rename_map = {
+        "pm2_5": "pm25",
+        "pm_2_5": "pm25",
+        "pm2_5_value": "pm25",
+        "pm10_value": "pm10",
+        "aqi_value": "aqi",
+        "sulfur_dioxide": "so2",
+        "sulphur_dioxide": "so2",
+        "carbon_monoxide": "co",
+        "nitrogen_dioxide": "no2",
+        "ozone": "o3",
+        "ammonia": "nh3"
+    }
+
+    existing_rename_map = {}
+
+    for old_col, new_col in rename_map.items():
+        if old_col in df.columns and new_col not in df.columns:
+            existing_rename_map[old_col] = new_col
+
+    df = df.rename(columns=existing_rename_map)
+
+    return df
+
+
+def read_power_file(file_path):
+    """
+    NASA POWER CSV files often contain metadata before the real table.
+    This function finds the real table header starting with YEAR.
+    """
+
+    with open(file_path, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+
+    header_row = None
+
+    for i, line in enumerate(lines):
+        if line.strip().startswith("YEAR"):
+            header_row = i
+            break
+
+    if header_row is None:
+        return pd.read_csv(file_path)
+
+    return pd.read_csv(file_path, skiprows=header_row)
+
+
+def infer_station_from_filename(file_name):
+    name = file_name.lower()
+
+    if "byrnihat" in name:
+        return "Byrnihat"
+    if "guwahati" in name:
+        return "Guwahati"
+    if "shillong" in name:
+        return "Shillong"
+
+    return "regional_average"
+
+
+def add_wind_vectors(df):
+    """
+    NASA wind direction is usually the direction FROM which wind comes.
+    For pollution movement, we want the direction TO which air/pollutants move.
+
+    wind_u:
+        positive = eastward movement
+        negative = westward movement
+
+    wind_v:
+        positive = northward movement
+        negative = southward movement
+    """
+
+    df = df.copy()
+
+    if "wind_speed" not in df.columns:
+        df["wind_speed"] = np.nan
+
+    if "wind_direction" not in df.columns:
+        df["wind_direction"] = np.nan
+
+    theta = np.deg2rad(df["wind_direction"])
+
+    df["wind_u"] = -df["wind_speed"] * np.sin(theta)
+    df["wind_v"] = -df["wind_speed"] * np.cos(theta)
+
+    return df
+
+
+def reconstruct_wind_from_vectors(df):
+    """
+    After averaging wind_u and wind_v, reconstruct:
+    - wind_speed
+    - wind_to_direction
+    - wind_direction, meaning wind FROM direction
+    """
+
+    df = df.copy()
+
+    if "wind_u" in df.columns and "wind_v" in df.columns:
+        df["wind_speed"] = np.sqrt(df["wind_u"] ** 2 + df["wind_v"] ** 2)
+
+        # Direction TO which pollutant moves, degrees clockwise from North
+        df["wind_to_direction"] = (
+            np.degrees(np.arctan2(df["wind_u"], df["wind_v"])) + 360
+        ) % 360
+
+        # Direction FROM which wind comes
+        df["wind_direction"] = (df["wind_to_direction"] + 180) % 360
+
+    return df
+
+
+
+# 3. Load AQICN clean base dataset
+
+print("=" * 80)
+print("LOADING AQICN CLEAN BASE DATA")
+print("=" * 80)
+
+if not AQICN_FILE.exists():
+    raise FileNotFoundError(f"AQICN clean file not found: {AQICN_FILE}")
+
+aq = pd.read_csv(AQICN_FILE)
+aq = clean_column_names(aq)
+aq = standardize_pollutant_names(aq)
+
+if "datetime" not in aq.columns:
+    raise ValueError("AQICN dataset must contain a datetime column.")
+
+if "station_name" not in aq.columns:
+    raise ValueError("AQICN dataset must contain a station_name column.")
+
+aq["datetime"] = pd.to_datetime(aq["datetime"], errors="coerce")
+aq = aq.dropna(subset=["datetime"])
+aq = aq.sort_values("datetime")
+
+# Convert pollutant columns to numeric if present
+pollutant_columns = [
+    "pm25",
+    "pm10",
+    "aqi",
+    "so2",
+    "co",
+    "no2",
+    "o3",
+    "nh3",
+    "no",
+    "nox"
+]
+
+for col in pollutant_columns:
+    if col in aq.columns:
+        aq[col] = pd.to_numeric(aq[col], errors="coerce")
+
+# Convert location columns to numeric if present
+for col in ["latitude", "longitude"]:
+    if col in aq.columns:
+        aq[col] = pd.to_numeric(aq[col], errors="coerce")
+
+print("AQICN shape:", aq.shape)
+print("AQICN columns:")
+print(aq.columns.tolist())
+
+available_pollutants = [col for col in pollutant_columns if col in aq.columns]
+
+print("\nAvailable pollutant columns preserved from AQICN:")
+print(available_pollutants)
+
+missing_pollutants = [col for col in pollutant_columns if col not in aq.columns]
+
+print("\nPollutant columns not found in AQICN clean base:")
+print(missing_pollutants)
+
+# 4. Load old static NASA POWER files
+
+def load_old_nasa_power_files():
+    power_files = list(DATA_DIR.glob("POWER*.csv")) + list(RAW_DIR.glob("POWER*.csv"))
+
+    print("\n" + "=" * 80)
+    print("LOADING OLD STATIC NASA POWER FILES")
+    print("=" * 80)
+
+    if not power_files:
+        print("No old NASA POWER files found.")
+        return pd.DataFrame()
+
+    weather_dfs = []
+
+    print("NASA POWER files found:")
+    for file in power_files:
+        print("-", file.name)
+
+    for file in power_files:
+        w = read_power_file(file)
+        w = clean_column_names(w)
+
+        required_time_cols = ["year", "mo", "dy", "hr"]
+
+        missing_time_cols = [col for col in required_time_cols if col not in w.columns]
+
+        if missing_time_cols:
+            print(f"Skipping {file.name}. Missing time columns: {missing_time_cols}")
+            continue
+
+        w["datetime"] = pd.to_datetime(
+            {
+                "year": w["year"],
+                "month": w["mo"],
+                "day": w["dy"],
+                "hour": w["hr"]
+            },
+            errors="coerce"
+        )
+
+        weather = pd.DataFrame()
+        weather["datetime"] = w["datetime"]
+        weather["weather_station_name"] = infer_station_from_filename(file.name)
+        weather["weather_source"] = file.name
+
+        if "t2m" in w.columns:
+            weather["temperature"] = pd.to_numeric(w["t2m"], errors="coerce")
+
+        if "rh2m" in w.columns:
+            weather["humidity"] = pd.to_numeric(w["rh2m"], errors="coerce")
+
+        if "prectotcorr" in w.columns:
+            weather["rainfall"] = pd.to_numeric(w["prectotcorr"], errors="coerce")
+        elif "prectot" in w.columns:
+            weather["rainfall"] = pd.to_numeric(w["prectot"], errors="coerce")
+
+        if "ws10m" in w.columns:
+            weather["wind_speed"] = pd.to_numeric(w["ws10m"], errors="coerce")
+        elif "ws2m" in w.columns:
+            weather["wind_speed"] = pd.to_numeric(w["ws2m"], errors="coerce")
+
+        if "wd10m" in w.columns:
+            weather["wind_direction"] = pd.to_numeric(w["wd10m"], errors="coerce")
+        elif "wd2m" in w.columns:
+            weather["wind_direction"] = pd.to_numeric(w["wd2m"], errors="coerce")
+
+        weather = weather.dropna(subset=["datetime"])
+
+        weather_dfs.append(weather)
+
+    if not weather_dfs:
+        return pd.DataFrame()
+
+    old_weather = pd.concat(weather_dfs, ignore_index=True)
+
+    return old_weather
+
+# 5. Load NASA tracker data
+
+def load_nasa_tracker_file():
+    print("\n" + "=" * 80)
+    print("LOADING NASA POWER TRACKER FILE")
+    print("=" * 80)
+
+    if not NASA_TRACKER_FILE.exists():
+        print("NASA tracker file not found.")
+        return pd.DataFrame()
+
+    tracker = pd.read_csv(NASA_TRACKER_FILE)
+    tracker = clean_column_names(tracker)
+
+    print("NASA tracker found:", NASA_TRACKER_FILE)
+    print("Tracker shape:", tracker.shape)
+    print("Tracker columns:")
+    print(tracker.columns.tolist())
+
+    weather = pd.DataFrame()
+
+    if "datetime_ist" in tracker.columns:
+        weather["datetime"] = pd.to_datetime(tracker["datetime_ist"], errors="coerce")
+    elif "datetime_utc" in tracker.columns:
+        weather["datetime"] = pd.to_datetime(tracker["datetime_utc"], errors="coerce")
+    else:
+        raise ValueError("NASA tracker must contain datetime_ist or datetime_utc.")
+
+    if "station_name" in tracker.columns:
+        weather["weather_station_name"] = tracker["station_name"].astype(str)
+    else:
+        weather["weather_station_name"] = "regional_average"
+
+    weather["weather_source"] = "nasa_power_hourly_tracker.csv"
+
+    for col in ["temperature", "humidity", "rainfall", "wind_speed", "wind_direction"]:
+        if col in tracker.columns:
+            weather[col] = pd.to_numeric(tracker[col], errors="coerce")
+        else:
+            weather[col] = np.nan
+
+    weather = weather.dropna(subset=["datetime"])
+
+    return weather
+
+
+# 6. Combine and clean weather data
+
+old_weather = load_old_nasa_power_files()
+tracker_weather = load_nasa_tracker_file()
+
+weather_sources = []
+
+if not old_weather.empty:
+    weather_sources.append(old_weather)
+
+if not tracker_weather.empty:
+    weather_sources.append(tracker_weather)
+
+if not weather_sources:
+    raise FileNotFoundError(
+        "No NASA weather data found. Need old POWER*.csv files or nasa_power_hourly_tracker.csv."
     )
 
-    if not station_df.empty:
-        all_weather_dfs.append(station_df)
+weather = pd.concat(weather_sources, ignore_index=True)
 
-if not all_weather_dfs:
-    raise RuntimeError("No NASA Power data has been fetched.")
+weather["datetime"] = pd.to_datetime(weather["datetime"], errors="coerce")
+weather = weather.dropna(subset=["datetime"])
 
-new_weather = pd.concat(all_weather_dfs, ignore_index = True)
+for col in ["temperature", "humidity", "rainfall", "wind_speed", "wind_direction"]:
+    if col not in weather.columns:
+        weather[col] = np.nan
 
-#7. Add local datetime
+    weather[col] = pd.to_numeric(weather[col], errors="coerce")
 
-new_weather["datetime_ist"] = new_weather["datetime_utc"] + pd.Timedelta(hours = 5, minutes = 30)
-#Since UST is ahead of IST by 5 hours and 30 minuites
+weather = add_wind_vectors(weather)
 
-#8. Clean Numeric Columns
+# Average duplicate weather rows using vector-safe wind representation
+weather_numeric_cols = [
+    "temperature",
+    "humidity",
+    "rainfall",
+    "wind_u",
+    "wind_v"
+]
 
-numeric_cols = [
+weather_grouped = (
+    weather
+    .groupby(["weather_station_name", "datetime"], as_index=False)[weather_numeric_cols]
+    .mean()
+)
+
+weather_grouped = reconstruct_wind_from_vectors(weather_grouped)
+
+weather_grouped["weather_datetime"] = weather_grouped["datetime"]
+
+weather_grouped = weather_grouped.sort_values(["weather_station_name", "datetime"])
+
+print("\n" + "=" * 80)
+print("COMBINED CLEAN WEATHER DATA")
+print("=" * 80)
+print("Weather shape:", weather_grouped.shape)
+print("Weather date range:")
+print("Start:", weather_grouped["datetime"].min())
+print("End  :", weather_grouped["datetime"].max())
+print("\nWeather stations:")
+print(weather_grouped["weather_station_name"].unique().tolist())
+
+print("\nWeather missing values:")
+print(weather_grouped.isna().sum())
+
+# 7. Nearest datetime merge by station
+
+def nearest_weather_merge_by_station(aq_df, weather_df, tolerance_hours):
+    merged_parts = []
+
+    weather_station_names_lower = (
+        weather_df["weather_station_name"]
+        .astype(str)
+        .str.lower()
+        .unique()
+        .tolist()
+    )
+
+    for station_name, aq_station_df in aq_df.groupby("station_name", dropna=False):
+        station_string = str(station_name)
+        station_lower = station_string.lower()
+
+        aq_part = aq_station_df.sort_values("datetime").copy()
+
+        if station_lower in weather_station_names_lower:
+            weather_part = weather_df[
+                weather_df["weather_station_name"].astype(str).str.lower() == station_lower
+            ].copy()
+        else:
+            weather_part = weather_df.copy()
+            weather_part["weather_station_name"] = "regional_average"
+
+        weather_part = weather_part.sort_values("datetime")
+
+        merged = pd.merge_asof(
+            aq_part,
+            weather_part,
+            on="datetime",
+            direction="nearest",
+            tolerance=pd.Timedelta(hours=tolerance_hours)
+        )
+
+        merged_parts.append(merged)
+
+    return pd.concat(merged_parts, ignore_index=True)
+
+
+print("\n" + "=" * 80)
+print("MERGING AQICN + NASA WEATHER")
+print("=" * 80)
+
+ml1 = nearest_weather_merge_by_station(
+    aq_df=aq,
+    weather_df=weather_grouped,
+    tolerance_hours=WEATHER_TOLERANCE_HOURS
+)
+
+ml1["weather_merge_mode"] = "nearest_datetime"
+ml1["is_prototype_weather_match"] = False
+
+if "weather_datetime" in ml1.columns:
+    ml1["weather_gap_hours"] = (
+        (ml1["datetime"] - ml1["weather_datetime"])
+        .abs()
+        .dt.total_seconds() / 3600
+    )
+else:
+    ml1["weather_gap_hours"] = np.nan
+
+matched_rows = ml1["wind_speed"].notna().sum()
+total_rows = len(ml1)
+
+if total_rows > 0:
+    match_percent = (matched_rows / total_rows) * 100
+else:
+    match_percent = 0
+
+print(f"Nearest datetime weather matched rows: {matched_rows}/{total_rows} ({match_percent:.2f}%)")
+
+print("\nWeather gap summary:")
+print(ml1["weather_gap_hours"].describe())
+
+
+# 8. Final-ready fallback for old NASA data
+
+if match_percent < FALLBACK_MATCH_THRESHOLD_PERCENT:
+    print("\nLow nearest-datetime match detected.")
+    print("Using final-compatible fallback: station-aware month-day-hour weather matching.")
+    print("This keeps the code final-ready, but the fallback data should be replaced for final scientific validation.")
+
+    aq_fallback = aq.copy()
+    weather_fallback = weather_grouped.copy()
+
+    aq_fallback["month"] = aq_fallback["datetime"].dt.month
+    aq_fallback["day"] = aq_fallback["datetime"].dt.day
+    aq_fallback["hour"] = aq_fallback["datetime"].dt.hour
+
+    weather_fallback["month"] = weather_fallback["datetime"].dt.month
+    weather_fallback["day"] = weather_fallback["datetime"].dt.day
+    weather_fallback["hour"] = weather_fallback["datetime"].dt.hour
+
+    fallback_parts = []
+
+    weather_station_names_lower = (
+        weather_fallback["weather_station_name"]
+        .astype(str)
+        .str.lower()
+        .unique()
+        .tolist()
+    )
+
+    for station_name, aq_station_df in aq_fallback.groupby("station_name", dropna=False):
+        station_string = str(station_name)
+        station_lower = station_string.lower()
+
+        if station_lower in weather_station_names_lower:
+            weather_part = weather_fallback[
+                weather_fallback["weather_station_name"].astype(str).str.lower() == station_lower
+            ].copy()
+            used_weather_station = station_string
+        else:
+            weather_part = weather_fallback.copy()
+            used_weather_station = "regional_average"
+
+        fallback_numeric_cols = [
+            "temperature",
+            "humidity",
+            "rainfall",
+            "wind_u",
+            "wind_v"
+        ]
+
+        weather_key = (
+            weather_part
+            .groupby(["month", "day", "hour"], as_index=False)[fallback_numeric_cols]
+            .mean()
+        )
+
+        weather_key = reconstruct_wind_from_vectors(weather_key)
+
+        merged_part = pd.merge(
+            aq_station_df,
+            weather_key,
+            on=["month", "day", "hour"],
+            how="left"
+        )
+
+        merged_part["weather_station_name"] = used_weather_station
+        merged_part["weather_datetime"] = pd.NaT
+        merged_part["weather_gap_hours"] = np.nan
+        merged_part["weather_merge_mode"] = "month_day_hour_fallback"
+        merged_part["is_prototype_weather_match"] = True
+
+        fallback_parts.append(merged_part)
+
+    ml1 = pd.concat(fallback_parts, ignore_index=True)
+
+    matched_rows = ml1["wind_speed"].notna().sum()
+    total_rows = len(ml1)
+
+    if total_rows > 0:
+        match_percent = (matched_rows / total_rows) * 100
+    else:
+        match_percent = 0
+
+    print(f"Fallback weather matched rows: {matched_rows}/{total_rows} ({match_percent:.2f}%)")
+
+# 9. Final time features
+
+ml1["datetime"] = pd.to_datetime(ml1["datetime"], errors="coerce")
+
+ml1["hour"] = ml1["datetime"].dt.hour
+ml1["day"] = ml1["datetime"].dt.day
+ml1["month"] = ml1["datetime"].dt.month
+ml1["day_of_week"] = ml1["datetime"].dt.dayofweek
+
+# Cyclic time features
+ml1["hour_sin"] = np.sin(2 * np.pi * ml1["hour"] / 24)
+ml1["hour_cos"] = np.cos(2 * np.pi * ml1["hour"] / 24)
+
+ml1["month_sin"] = np.sin(2 * np.pi * ml1["month"] / 12)
+ml1["month_cos"] = np.cos(2 * np.pi * ml1["month"] / 12)
+
+# 10. Final numeric cleanup
+
+final_numeric_cols = [
+    "latitude",
+    "longitude",
+    "pm25",
+    "pm10",
+    "aqi",
+    "so2",
+    "co",
+    "no2",
+    "o3",
+    "nh3",
+    "no",
+    "nox",
     "temperature",
     "humidity",
     "rainfall",
     "wind_speed",
-    "wind_direction"
+    "wind_direction",
+    "wind_to_direction",
+    "wind_u",
+    "wind_v",
+    "weather_gap_hours",
+    "hour",
+    "day",
+    "month",
+    "day_of_week",
+    "hour_sin",
+    "hour_cos",
+    "month_sin",
+    "month_cos"
 ]
 
-for col in numeric_cols:
-    new_weather[col] = pd.to_numeric(new_weather[col], errors = "coerce")
+for col in final_numeric_cols:
+    if col in ml1.columns:
+        ml1[col] = pd.to_numeric(ml1[col], errors="coerce")
 
-#9. Load Old Tracker if it exists
 
-if OUTPUT_FILE.exists():
-    old_weather = pd.read_csv(OUTPUT_FILE)
-    old_weather["datetime_utc"] = pd.to_datetime(old_weather["datetime_utc"], errors = "coerce")
-    old_weather["datetime_ist"] = pd.to_datetime(old_weather["datetime_ist"], errors = "coerce")
 
-    combined = pd.concat([old_weather, new_weather], ignore_index = True)
+# 11. Final ordering and save
 
-else: 
-    combined = new_weather.copy()
+preferred_columns = [
+    "datetime",
+    "station_name",
+    "latitude",
+    "longitude",
+    "pm25",
+    "pm10",
+    "aqi",
+    "so2",
+    "co",
+    "no2",
+    "o3",
+    "nh3",
+    "no",
+    "nox",
+    "temperature",
+    "humidity",
+    "rainfall",
+    "wind_speed",
+    "wind_direction",
+    "wind_to_direction",
+    "wind_u",
+    "wind_v",
+    "hour",
+    "day",
+    "month",
+    "day_of_week",
+    "hour_sin",
+    "hour_cos",
+    "month_sin",
+    "month_cos",
+    "weather_station_name",
+    "weather_datetime",
+    "weather_gap_hours",
+    "weather_merge_mode",
+    "is_prototype_weather_match"
+]
 
-#10. Remove Duplicates
+existing_preferred_columns = [col for col in preferred_columns if col in ml1.columns]
+remaining_columns = [col for col in ml1.columns if col not in existing_preferred_columns]
 
-combined = combined.drop_duplicates(
-    subset = ["station_name", "datetime_utc"],
-    keep = "last"
+ml1 = ml1[existing_preferred_columns + remaining_columns]
+
+ml1 = ml1.drop_duplicates()
+ml1 = ml1.sort_values(["station_name", "datetime"])
+
+ml1.to_csv(OUTPUT_FILE, index=False)
+
+# 12. Reports
+
+missing_report = pd.DataFrame(
+    {
+        "column": ml1.columns,
+        "missing_count": ml1.isna().sum().values,
+        "missing_percent": (ml1.isna().mean().values * 100).round(2)
+    }
 )
 
-combined = combined.sort_values(["station_name", "datetime_utc"])
+missing_report.to_csv(MISSING_REPORT_FILE, index=False)
 
-#11. Save Tracker File
 
-combined.to_csv(OUTPUT_FILE, index=False)
+print("\n" + "=" * 80)
+print("FINAL ML1 DATASET CREATED")
+print("=" * 80)
 
-print("\nNASA POWER hourly tracker updated successfully.")
-print("Saved to:")
+print("Saved ML1 dataset to:")
 print(OUTPUT_FILE)
 
-print("\nFinal shape:")
-print(combined.shape)
+print("\nFinal ML1 shape:")
+print(ml1.shape)
 
-print("\nDate range:")
-print("UTC start:", combined["datetime_utc"].min())
-print("UTC end  :", combined["datetime_utc"].max())
+print("\nFinal columns:")
+print(ml1.columns.tolist())
 
-print("\nLast few rows:")
-print(combined.tail())
+print("\nAvailable pollutant columns in final ML1:")
+print([col for col in pollutant_columns if col in ml1.columns])
+
+print("\nWeather merge mode counts:")
+print(ml1["weather_merge_mode"].value_counts(dropna=False))
+
+print("\nPrototype weather match counts:")
+print(ml1["is_prototype_weather_match"].value_counts(dropna=False))
+
+print("\nMissing report saved to:")
+print(MISSING_REPORT_FILE)
+
+print("\nMissing values summary:")
+print(missing_report.sort_values("missing_percent", ascending=False).head(20))
+
+print("\nFirst 10 rows:")
+print(ml1.head(10))
+
+print("\nML1 dataset preparation completed.")
