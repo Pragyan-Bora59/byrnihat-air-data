@@ -93,4 +93,8 @@ jobs:
             git commit -m "Update AQICN air quality data"
             git pull --rebase origin main
             git push origin main
+<<<<<<< HEAD
           fi
+=======
+          fi
+>>>>>>> 0e2c3f6 (Fix AQICN workflow token and data recording)
