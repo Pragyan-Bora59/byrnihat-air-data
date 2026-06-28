@@ -1,260 +1,416 @@
+# Record_AQICNdata.py
+
+from __future__ import annotations
+
 import os
 from pathlib import Path
-from datetime import datetime
+from typing import Any
 
-import requests
 import pandas as pd
-from dotenv import load_dotenv
+import requests
+
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except ImportError:
+    pass
 
 
-# ============================================================
-# 1. Load AQICN API token
-# ============================================================
+AQICN_API_URL_TEMPLATE = "https://api.waqi.info/feed/geo:{lat};{lon}/?token={token}"
 
-BASE_DIR = Path(__file__).resolve().parent
-load_dotenv(BASE_DIR / ".env")
-
-AQICN_TOKEN = os.getenv("AQICN_TOKEN")
-
-
-# ============================================================
-# 2. Stations
-# ============================================================
+RAW_FETCH_LOG_FILE = Path("data/raw/aqicn_fetch_log.csv")
 
 STATIONS = [
     {
-        "city": "Byrnihat",
-        "station_name": "15th Mile-Nongthymmai, Byrnihat",
+        "target_city": "Byrnihat",
         "station_code": "A1364707",
-        "url": "https://api.waqi.info/feed/A1364707/",
-        "file": Path("data/byrnihat_aqicn_data.csv")
+        "station_name": "15th Mile-Nongthymmai, Byrnihat",
+        "latitude": 26.05374,
+        "longitude": 91.86796,
+        "processed_file": Path("data/processed/byrnihat_aqicn_observations.csv"),
+        "legacy_file": Path("data/byrnihat_aqicn_data.csv"),
     },
     {
-        "city": "Guwahati",
-        "station_name": "Railway Colony, Guwahati",
+        "target_city": "Guwahati",
         "station_code": "H11844",
-        "url": "https://api.waqi.info/feed/@11844/",
-        "file": Path("data/guwahati_aqicn_data.csv")
+        "station_name": "Railway Colony, Guwahati, India",
+        "latitude": 26.181742,
+        "longitude": 91.78063,
+        "processed_file": Path("data/processed/guwahati_aqicn_observations.csv"),
+        "legacy_file": Path("data/guwahati_aqicn_data.csv"),
     },
     {
-        "city": "Shillong",
-        "station_name": "Lumpyngngad, Shillong",
+        "target_city": "Shillong",
         "station_code": "H12740",
-        "url": "https://api.waqi.info/feed/@12740/",
-        "file": Path("data/shillong_aqicn_data.csv")
-    }
+        "station_name": "Lumpyngngad, Shillong, India",
+        "latitude": 25.5586,
+        "longitude": 91.8985,
+        "processed_file": Path("data/processed/shillong_aqicn_observations.csv"),
+        "legacy_file": Path("data/shillong_aqicn_data.csv"),
+    },
 ]
 
 
-# ============================================================
-# 3. Fetch AQICN data
-# ============================================================
+OBSERVATION_COLUMNS = [
+    "first_collection_time_utc",
+    "target_city",
+    "station_code",
+    "station_name",
+    "station_latitude",
+    "station_longitude",
+    "aqicn_idx",
+    "api_time",
+    "aqi",
+    "pm25",
+    "pm10",
+    "no2",
+    "so2",
+    "co",
+    "o3",
+    "nh3",
+    "no",
+    "nox",
+    "temperature",
+    "humidity",
+    "pressure",
+    "wind",
+]
 
-def fetch_aqicn_data(station):
-    if not AQICN_TOKEN:
-        raise ValueError(
-            "AQICN_TOKEN not found. Add it as a GitHub Actions secret "
-            "or in your local .env file."
-        )
+RAW_COLUMNS = [
+    "collection_time_utc",
+    "fetch_success",
+    "api_status",
+    "error_message",
+    "target_city",
+    "station_code",
+    "station_name",
+    "station_latitude",
+    "station_longitude",
+    "aqicn_idx",
+    "api_time",
+    "aqi",
+    "pm25",
+    "pm10",
+    "no2",
+    "so2",
+    "co",
+    "o3",
+    "nh3",
+    "no",
+    "nox",
+    "temperature",
+    "humidity",
+    "pressure",
+    "wind",
+]
 
-    params = {
-        "token": AQICN_TOKEN
-    }
 
-    response = requests.get(
-        station["url"],
-        params=params,
-        timeout=30
+def get_aqicn_token() -> str:
+    token = (
+        os.getenv("AQICN_TOKEN")
+        or os.getenv("AQICN_API_TOKEN")
+        or os.getenv("WAQI_TOKEN")
     )
 
-    response.raise_for_status()
-
-    api_response = response.json()
-
-    if api_response.get("status") != "ok":
-        raise ValueError(
-            f"API returned an error for {station['city']}: {api_response}"
+    if not token:
+        raise RuntimeError(
+            "AQICN token not found. Add it as AQICN_TOKEN in GitHub Secrets or .env."
         )
 
-    return api_response["data"]
+    return token
 
 
-# ============================================================
-# 4. Safely get pollutant values
-# ============================================================
+def get_iaqi_value(iaqi: dict[str, Any], key: str) -> float | int | None:
+    value = iaqi.get(key)
 
-def get_iaqi_value(iaqi_data, pollutant_name):
-    pollutant_data = iaqi_data.get(pollutant_name)
+    if isinstance(value, dict):
+        return value.get("v")
 
-    if pollutant_data is None:
-        return None
-
-    return pollutant_data.get("v")
+    return None
 
 
-# ============================================================
-# 5. Convert API response into one clean row
-# ============================================================
-
-def convert_api_data_to_row(data, station):
-    iaqi = data.get("iaqi", {})
-    city = data.get("city", {})
+def get_api_time(data: dict[str, Any]) -> str | None:
     time_info = data.get("time", {})
 
-    station_coordinates = city.get("geo", [None, None])
+    if isinstance(time_info, dict):
+        return time_info.get("s") or time_info.get("iso")
 
-    row = {
-        "recorded_at_local_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    return None
 
-        "target_city": station["city"],
+
+def fetch_station_data(station: dict[str, Any], token: str) -> dict[str, Any]:
+    url = AQICN_API_URL_TEMPLATE.format(
+        lat=station["latitude"],
+        lon=station["longitude"],
+        token=token,
+    )
+
+    response = requests.get(url, timeout=30)
+    response.raise_for_status()
+
+    return response.json()
+
+
+def build_base_row(station: dict[str, Any], collection_time_utc: str) -> dict[str, Any]:
+    return {
+        "collection_time_utc": collection_time_utc,
+        "fetch_success": False,
+        "api_status": None,
+        "error_message": None,
+        "target_city": station["target_city"],
         "station_code": station["station_code"],
-
-        "station_name": city.get("name"),
-        "station_latitude": station_coordinates[0],
-        "station_longitude": station_coordinates[1],
-
-        "api_time": time_info.get("s"),
-        "aqi": data.get("aqi"),
-
-        "pm25": get_iaqi_value(iaqi, "pm25"),
-        "pm10": get_iaqi_value(iaqi, "pm10"),
-        "no2": get_iaqi_value(iaqi, "no2"),
-        "so2": get_iaqi_value(iaqi, "so2"),
-        "co": get_iaqi_value(iaqi, "co"),
-        "o3": get_iaqi_value(iaqi, "o3"),
-
-        "temperature": get_iaqi_value(iaqi, "t"),
-        "humidity": get_iaqi_value(iaqi, "h"),
-        "pressure": get_iaqi_value(iaqi, "p"),
-        "wind": get_iaqi_value(iaqi, "w"),
+        "station_name": station["station_name"],
+        "station_latitude": station["latitude"],
+        "station_longitude": station["longitude"],
+        "aqicn_idx": None,
+        "api_time": None,
+        "aqi": None,
+        "pm25": None,
+        "pm10": None,
+        "no2": None,
+        "so2": None,
+        "co": None,
+        "o3": None,
+        "nh3": None,
+        "no": None,
+        "nox": None,
+        "temperature": None,
+        "humidity": None,
+        "pressure": None,
+        "wind": None,
     }
+
+
+def parse_successful_response(
+    station: dict[str, Any],
+    api_response: dict[str, Any],
+    collection_time_utc: str,
+) -> dict[str, Any]:
+    row = build_base_row(station, collection_time_utc)
+
+    api_status = api_response.get("status")
+    row["api_status"] = api_status
+
+    if api_status != "ok":
+        row["error_message"] = str(api_response.get("data", "AQICN returned non-ok status"))
+        return row
+
+    data = api_response.get("data", {})
+
+    if not isinstance(data, dict):
+        row["error_message"] = "AQICN response data is not a dictionary."
+        return row
+
+    iaqi = data.get("iaqi", {})
+
+    if not isinstance(iaqi, dict):
+        iaqi = {}
+
+    city_info = data.get("city", {})
+
+    if not isinstance(city_info, dict):
+        city_info = {}
+
+    geo = city_info.get("geo", [])
+
+    if isinstance(geo, list) and len(geo) >= 2:
+        row["station_latitude"] = geo[0]
+        row["station_longitude"] = geo[1]
+
+    row.update(
+        {
+            "fetch_success": True,
+            "error_message": None,
+            "aqicn_idx": data.get("idx"),
+            "api_time": get_api_time(data),
+            "aqi": data.get("aqi"),
+            "pm25": get_iaqi_value(iaqi, "pm25"),
+            "pm10": get_iaqi_value(iaqi, "pm10"),
+            "no2": get_iaqi_value(iaqi, "no2"),
+            "so2": get_iaqi_value(iaqi, "so2"),
+            "co": get_iaqi_value(iaqi, "co"),
+            "o3": get_iaqi_value(iaqi, "o3"),
+            "nh3": get_iaqi_value(iaqi, "nh3"),
+            "no": get_iaqi_value(iaqi, "no"),
+            "nox": get_iaqi_value(iaqi, "nox"),
+            "temperature": get_iaqi_value(iaqi, "t"),
+            "humidity": get_iaqi_value(iaqi, "h"),
+            "pressure": get_iaqi_value(iaqi, "p"),
+            "wind": get_iaqi_value(iaqi, "w"),
+        }
+    )
+
+    if row["api_time"] is None:
+        row["fetch_success"] = False
+        row["error_message"] = "AQICN response did not contain api_time."
 
     return row
 
 
-# ============================================================
-# 6. Save row to station CSV without losing old data
-# ============================================================
+def append_raw_fetch_log(row: dict[str, Any]) -> None:
+    RAW_FETCH_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
 
-def save_row_to_city_csv(row, station):
-    data_file = station["file"]
+    raw_row = {column: row.get(column) for column in RAW_COLUMNS}
 
-    data_file.parent.mkdir(parents=True, exist_ok=True)
+    raw_data = pd.DataFrame([raw_row], columns=RAW_COLUMNS)
 
-    new_data = pd.DataFrame([row])
+    raw_data.to_csv(
+        RAW_FETCH_LOG_FILE,
+        mode="a",
+        header=not RAW_FETCH_LOG_FILE.exists(),
+        index=False,
+    )
 
-    # This records when our GitHub/local script collected the row.
-    new_data["collection_time_utc"] = pd.Timestamp.utcnow()
+    print(f"Raw fetch logged: {row['target_city']}")
 
-    if data_file.exists():
-        old_data = pd.read_csv(data_file)
 
-        combined_data = pd.concat(
-            [old_data, new_data],
-            ignore_index=True
-        )
+def normalize_legacy_data(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+
+    if "0" in df.columns:
+        df = df.drop(columns=["0"])
+
+    if "recorded_at_local_time" in df.columns and "first_collection_time_utc" not in df.columns:
+        df = df.rename(columns={"recorded_at_local_time": "first_collection_time_utc"})
+
+    for column in OBSERVATION_COLUMNS:
+        if column not in df.columns:
+            df[column] = None
+
+    return df[OBSERVATION_COLUMNS]
+
+
+def load_existing_processed_data(station: dict[str, Any]) -> pd.DataFrame:
+    processed_file = station["processed_file"]
+    legacy_file = station["legacy_file"]
+
+    if processed_file.exists():
+        existing_data = pd.read_csv(processed_file)
+        return normalize_legacy_data(existing_data)
+
+    if legacy_file.exists():
+        legacy_data = pd.read_csv(legacy_file)
+        return normalize_legacy_data(legacy_data)
+
+    return pd.DataFrame(columns=OBSERVATION_COLUMNS)
+
+
+def update_processed_observations(row: dict[str, Any], station: dict[str, Any]) -> int:
+    if not row.get("fetch_success"):
+        print(f"Processed skipped: {row['target_city']} fetch was not successful.")
+        return 0
+
+    if not row.get("api_time"):
+        print(f"Processed skipped: {row['target_city']} has no api_time.")
+        return 0
+
+    processed_file = station["processed_file"]
+    processed_file.parent.mkdir(parents=True, exist_ok=True)
+
+    existing_data = load_existing_processed_data(station)
+
+    observation_row = {
+        "first_collection_time_utc": row["collection_time_utc"],
+        "target_city": row["target_city"],
+        "station_code": row["station_code"],
+        "station_name": row["station_name"],
+        "station_latitude": row["station_latitude"],
+        "station_longitude": row["station_longitude"],
+        "aqicn_idx": row["aqicn_idx"],
+        "api_time": row["api_time"],
+        "aqi": row["aqi"],
+        "pm25": row["pm25"],
+        "pm10": row["pm10"],
+        "no2": row["no2"],
+        "so2": row["so2"],
+        "co": row["co"],
+        "o3": row["o3"],
+        "nh3": row["nh3"],
+        "no": row["no"],
+        "nox": row["nox"],
+        "temperature": row["temperature"],
+        "humidity": row["humidity"],
+        "pressure": row["pressure"],
+        "wind": row["wind"],
+    }
+
+    new_data = pd.DataFrame([observation_row], columns=OBSERVATION_COLUMNS)
+
+    combined_data = pd.concat(
+        [existing_data, new_data],
+        ignore_index=True,
+    )
+
+    combined_data = combined_data.dropna(how="all")
+
+    combined_data = combined_data.dropna(
+        subset=["station_code", "api_time"],
+        how="any",
+    )
+
+    before_deduplication = len(combined_data)
+
+    combined_data = combined_data.drop_duplicates(
+        subset=["station_code", "api_time"],
+        keep="first",
+    )
+
+    after_deduplication = len(combined_data)
+
+    combined_data = combined_data.sort_values(
+        by=["station_code", "api_time"],
+        ascending=True,
+    )
+
+    combined_data.to_csv(processed_file, index=False)
+
+    new_unique_rows_added = after_deduplication - len(existing_data.dropna(how="all"))
+
+    if before_deduplication == after_deduplication:
+        print(f"Processed updated: {row['target_city']} new observation added.")
     else:
-        combined_data = new_data.copy()
+        print(f"Processed unchanged: {row['target_city']} duplicate api_time already exists.")
 
-    # Standardize datetime-like columns.
-    if "api_time" in combined_data.columns:
-        combined_data["api_time"] = pd.to_datetime(
-            combined_data["api_time"],
-            errors="coerce"
+    print(f"Processed row count for {row['target_city']}: {after_deduplication}")
+
+    return max(new_unique_rows_added, 0)
+
+
+def collect_station(station: dict[str, Any], token: str) -> None:
+    collection_time_utc = pd.Timestamp.utcnow().isoformat()
+
+    try:
+        api_response = fetch_station_data(station, token)
+        row = parse_successful_response(
+            station=station,
+            api_response=api_response,
+            collection_time_utc=collection_time_utc,
         )
 
-    if "recorded_at_local_time" in combined_data.columns:
-        combined_data["recorded_at_local_time"] = pd.to_datetime(
-            combined_data["recorded_at_local_time"],
-            errors="coerce"
-        )
+    except Exception as error:
+        row = build_base_row(station, collection_time_utc)
+        row["api_status"] = "request_failed"
+        row["error_message"] = str(error)
 
-    if "collection_time_utc" in combined_data.columns:
-        combined_data["collection_time_utc"] = pd.to_datetime(
-            combined_data["collection_time_utc"],
-            errors="coerce"
-        )
-
-    # Same station_code + same api_time means same AQICN observation.
-    duplicate_keys = []
-
-    if "station_code" in combined_data.columns:
-        duplicate_keys.append("station_code")
-
-    if "api_time" in combined_data.columns:
-        duplicate_keys.append("api_time")
-
-    if duplicate_keys:
-        combined_data = combined_data.drop_duplicates(
-            subset=duplicate_keys,
-            keep="last"
-        )
-    else:
-        combined_data = combined_data.drop_duplicates(keep="last")
-
-    sort_cols = []
-
-    if "station_code" in combined_data.columns:
-        sort_cols.append("station_code")
-
-    if "api_time" in combined_data.columns:
-        sort_cols.append("api_time")
-
-    if sort_cols:
-        combined_data = combined_data.sort_values(sort_cols)
-
-    combined_data.to_csv(data_file, index=False)
-
-    print(f"Saved {len(combined_data)} total rows to {data_file}")
-
-    return len(combined_data)
+    append_raw_fetch_log(row)
+    update_processed_observations(row, station)
 
 
-# ============================================================
-# 7. Main function
-# ============================================================
+def main() -> None:
+    token = get_aqicn_token()
 
-def main():
-    print("Fetching latest AQICN air quality data for all stations...")
-
-    success_count = 0
+    print("Starting AQICN data collection...")
+    print(f"Raw fetch log file: {RAW_FETCH_LOG_FILE}")
 
     for station in STATIONS:
-        print(f"\nFetching data for {station['city']}...")
+        print("-" * 70)
+        print(f"Collecting AQICN data for {station['target_city']}")
+        collect_station(station, token)
 
-        try:
-            api_data = fetch_aqicn_data(station)
+    print("-" * 70)
+    print("AQICN data collection completed.")
 
-            row = convert_api_data_to_row(api_data, station)
-
-            total_rows = save_row_to_city_csv(row, station)
-
-            success_count += 1
-
-            print(
-                f"Success: {station['city']} | "
-                f"AQI: {row['aqi']} | "
-                f"PM2.5: {row['pm25']} | "
-                f"PM10: {row['pm10']} | "
-                f"API time: {row['api_time']} | "
-                f"Total rows now: {total_rows} | "
-                f"Saved to: {station['file']}"
-            )
-
-        except Exception as error:
-            print(f"Failed for {station['city']}: {error}")
-
-    if success_count == 0:
-        raise RuntimeError(
-            "No AQICN data was saved for any station. "
-            "Check AQICN_TOKEN, GitHub Secrets, and API response."
-        )
-
-
-# ============================================================
-# 8. Run program
-# ============================================================
 
 if __name__ == "__main__":
     main()
-

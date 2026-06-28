@@ -1,4 +1,4 @@
-name: Record AQICN data hourly
+name: Hourly AQICN Data Collection
 
 on:
   push:
@@ -6,54 +6,29 @@ on:
       - main
 
   schedule:
-    # GitHub uses UTC time.
-    # These 4 timings give GitHub multiple chances per hour.
-    # In IST, they roughly correspond to :37, :52, :07, and :22.
-    - cron: "7 * * * *"
-    - cron: "22 * * * *"
-    - cron: "37 * * * *"
-    - cron: "52 * * * *"
-
+    - cron: "0 * * * *"
   workflow_dispatch:
 
 permissions:
   contents: write
 
-concurrency:
-  group: aqicn-data-recording
-  cancel-in-progress: false
-
 jobs:
-  record-data:
+  collect-aqicn-data:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Show trigger information
-        run: |
-          echo "Workflow started"
-          echo "Triggered by: ${{ github.event_name }}"
-          echo "Current UTC time:"
-          date -u
-
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Show repository files
-        run: |
-          echo "Current folder:"
-          pwd
-          echo "Repository files:"
-          ls -la
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install Python dependencies
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install pandas requests python-dotenv
 
       - name: Run AQICN data collection script
         env:
@@ -61,37 +36,13 @@ jobs:
         run: |
           python Record_AQICNdata.py
 
-      - name: Check data folder after script
-        run: |
-          echo "Checking data folder after running Python script:"
-          ls -la data || echo "data folder not found"
-
       - name: Show AQICN CSV row counts
         run: |
-          python - << 'PY'
-          from pathlib import Path
-          import pandas as pd
+          echo "Raw fetch log:"
+          wc -l data/raw/aqicn_fetch_log.csv || true
 
-          print("AQICN CSV files after script:")
-
-          for file in Path("data").glob("*aqicn*.csv"):
-              try:
-                  df = pd.read_csv(file)
-                  print("=" * 80)
-                  print(file)
-                  print("Shape:", df.shape)
-
-                  if "api_time" in df.columns:
-                      print("Unique api_time:", df["api_time"].nunique())
-                      print("Start:", df["api_time"].min())
-                      print("End:", df["api_time"].max())
-
-                  print("Last rows:")
-                  print(df.tail())
-
-              except Exception as e:
-                  print(file, "ERROR:", e)
-          PY
+          echo "Processed observation files:"
+          wc -l data/processed/*.csv || true
 
       - name: Commit and push updated data
         run: |
@@ -100,10 +51,15 @@ jobs:
 
           git add data/
 
-          if git diff --cached --quiet; then
-            echo "No new data to commit."
+          if git diff --staged --quiet; then
+            echo "No data changes to commit"
           else
             git commit -m "Update AQICN air quality data"
+<<<<<<< HEAD
             git pull --rebase origin main
             git push origin main
           fi
+=======
+            git push
+          fi
+>>>>>>> d6c8897 (Updated project)

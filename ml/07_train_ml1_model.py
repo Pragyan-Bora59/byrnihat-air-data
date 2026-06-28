@@ -36,7 +36,7 @@ REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
 RANDOM_STATE = 42
 TEST_SIZE = 0.20
-MIN_TARGET_ROWS = 40
+MIN_TARGET_ROWS = 8
 MAX_FEATURE_MISSING_PERCENT = 70
 
 #2. Load ML-1 dataset
@@ -341,7 +341,7 @@ for target in possible_targets:
         )
     else:
         print(target, "| not found")
-        
+
 targets = []
 
 print("\n" + "=" * 80)
